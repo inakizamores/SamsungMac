@@ -27,11 +27,6 @@ final class Throttler {
             }
         }
     }
-
-    func cancel() {
-        pending?.cancel()
-        pending = nil
-    }
 }
 
 enum LoginItem {
@@ -106,10 +101,6 @@ final class TVSystem {
     /// The TV was on and stopped answering on the network (Wi-Fi dropout,
     /// TV busy). Shown as reconnecting rather than as the TV being off.
     var connectionLost = false
-    /// The TV's on-screen keyboard is up, so the panel offers a text field.
-    var keyboardOpen = false
-    /// What the panel's text field holds, mirrored into the TV's field.
-    var typedText = ""
 
     /// The TV can't report play state, so play/pause alternates locally,
     /// assuming something is playing the first time.
@@ -133,7 +124,6 @@ final class TVSystem {
     @ObservationIgnored private var volumeTask: Task<Void, Never>?
     @ObservationIgnored private var foregroundTask: Task<Void, Never>?
     @ObservationIgnored private let volumeThrottler = Throttler(interval: 0.15)
-    @ObservationIgnored private let textThrottler = Throttler(interval: 0.15)
 
     // Volume-mode evidence. The panel only swaps between slider and
     // steppers on what the TV actually did, and never mid-interaction.
@@ -185,17 +175,6 @@ final class TVSystem {
     init() {
         remote.onState = { [weak self] in self?.pairState = $0 }
         remote.onToken = { [weak self] in self?.token = $0 }
-        // The TV echoes each update back; only a newly opened keyboard's
-        // text is taken, so the echo never fights what's being typed.
-        remote.onKeyboard = { [weak self] text in
-            guard let self else { return }
-            if let text {
-                if !self.keyboardOpen { self.typedText = text }
-                self.keyboardOpen = true
-            } else {
-                self.keyboardOpen = false
-            }
-        }
         // Older firmware still answers the installed-apps request; merge it
         // with what the catalog lookup found.
         remote.onApps = { [weak self] found in
@@ -707,25 +686,6 @@ final class TVSystem {
         ensureRemote()
         remote.send(key)
         if [.home, .back, .enter, .source].contains(key) { recheckForeground() }
-    }
-
-    /// Sends the whole field on each change: the TV replaces its field's
-    /// text rather than appending, so edits and deletions carry over.
-    func typeText(_ text: String) {
-        typedText = text
-        ensureRemote()
-        textThrottler.call { [weak self] in self?.remote.sendText(text) }
-    }
-
-    /// Return in the panel: closes the TV's keyboard, which runs the search.
-    func submitText() {
-        textThrottler.cancel()
-        ensureRemote()
-        remote.sendText(typedText)
-        remote.endText()
-        typedText = ""
-        keyboardOpen = false
-        recheckForeground()
     }
 
     func playPause() {
