@@ -120,6 +120,9 @@ final class TVSystem {
     @ObservationIgnored private var appsLoadedFor = ""
     @ObservationIgnored private var appsLoadedAt: Date = .distantPast
     @ObservationIgnored private var recheckTask: Task<Void, Never>?
+    @ObservationIgnored private var appsTask: Task<Void, Never>?
+    @ObservationIgnored private var volumeTask: Task<Void, Never>?
+    @ObservationIgnored private var foregroundTask: Task<Void, Never>?
     @ObservationIgnored private let volumeThrottler = Throttler(interval: 0.15)
 
     // Volume-mode evidence. The panel only swaps between slider and
@@ -373,12 +376,21 @@ final class TVSystem {
         }
     }
 
+    /// One status pass. It only waits on the TV's quick info request;
+    /// everything slower (the app list, which app is on screen, volume)
+    /// runs beside it, at most one of each at a time. A TV whose app
+    /// service is sluggish can then never hold up noticing that it's back,
+    /// or leave the panel stuck until it's reopened.
     private func refresh() async {
         guard let ip = knownIP else { return }
-        guard let info = await TVInfo.fetch(host: ip) else {
-            // One missed answer is usually the TV being busy, not gone.
+        let fetched = await withDeadline(2) { await TVInfo.fetch(host: ip) }
+        guard knownIP == ip else { return }
+        guard let info = fetched else {
+            // A missed answer or two is usually the TV being busy, not
+            // gone: look again sooner, and only call it lost after a few.
             fetchFailures += 1
-            guard fetchFailures >= 2 else { return }
+            fastPollUntil = max(fastPollUntil, Date().addingTimeInterval(10))
+            guard fetchFailures >= 3 else { return }
             if reachable {
                 lostSince = Date()
                 fastPollUntil = Date().addingTimeInterval(45)
@@ -417,17 +429,33 @@ final class TVSystem {
         if Date() >= suppressPowerUntil { powerOn = info.powerOn }
         guard powerOn else { foregroundApp = nil; return }
         ensureRemote()
+        let tvID = currentTVID
         // The installed list rarely changes; refreshing it costs ~30
         // requests, which a busy TV's web server doesn't take well.
-        if appsLoadedFor != currentTVID || Date().timeIntervalSince(appsLoadedAt) > 600 {
-            appsLoadedFor = currentTVID
+        if appsTask == nil, appsLoadedFor != tvID || Date().timeIntervalSince(appsLoadedAt) > 600 {
+            appsLoadedFor = tvID
             appsLoadedAt = Date()
-            let found = await AppCatalog.installed(host: ip, known: apps)
-            if !found.isEmpty { setApps(found) }
+            let known = apps
+            appsTask = Task {
+                let found = await AppCatalog.installed(host: ip, known: known)
+                if !found.isEmpty, self.currentTVID == tvID { self.setApps(found) }
+                self.appsTask = nil
+            }
         }
-        await refreshVolume(ip)
+        if volumeTask == nil {
+            volumeTask = Task {
+                await self.refreshVolume(ip)
+                self.volumeTask = nil
+            }
+        }
         pollCount += 1
-        await checkForeground(ip, full: pollCount % 4 == 1)
+        if foregroundTask == nil {
+            let full = pollCount % 4 == 1
+            foregroundTask = Task {
+                await self.checkForeground(ip, full: full)
+                self.foregroundTask = nil
+            }
+        }
     }
 
     /// Which app is on screen. A full scan costs one request per installed
@@ -488,6 +516,13 @@ final class TVSystem {
     /// always a fresh reading to judge the next key press against.
     private func refreshVolume(_ ip: String) async {
         guard Date() >= suppressVolumeUntil, stepBurst == nil else { return }
+        // With sound on an external device the TV answers a volume query by
+        // asking that device over HDMI-CEC, and a soundbar playing something
+        // else (a Sonos on Spotify) takes that as the TV claiming it and
+        // switches to TV audio. The level is frozen in that mode anyway, so
+        // the TV isn't asked at all; pressing the volume keys, which do go
+        // to the device, is what reveals a switch back to the TV speakers.
+        if externalAudio { return }
         guard let v = await UPnP.volume(ip) else {
             // No volume service at all: keys are the only way to change it.
             upnpFailures += 1
@@ -541,8 +576,11 @@ final class TVSystem {
     /// of a burst and again once the burst settles; if the TV's own level
     /// didn't follow the keys, sound is going elsewhere.
     func stepVolume(up: Bool) {
-        guard let ip = knownIP else { press(up ? .volumeUp : .volumeDown); return }
         lastVolumeInteraction = Date()
+        // On an external device the keys are all there is; reading the TV's
+        // level to check would reach the device over HDMI-CEC (see
+        // refreshVolume).
+        guard let ip = knownIP, !externalAudio else { press(up ? .volumeUp : .volumeDown); return }
         if stepBurst == nil {
             stepBurst = StepBurst()
             Task {

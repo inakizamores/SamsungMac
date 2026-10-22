@@ -243,12 +243,12 @@ struct KeyCatcher: NSViewRepresentable {
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-        /// Grows or shrinks the window downward, keeping its top under the
-        /// menu bar.
+        /// Keeps the window's height on the content's, top fixed under the
+        /// menu bar. The window grows to fit by itself but never shrinks.
         func fit(height: CGFloat) {
             guard let w = window, height > 0 else { return }
             let f = w.frame
-            guard abs(f.height - height) > 0.5 else { return }
+            guard abs(f.height - height) > 0.25 else { return }
             w.setFrame(NSRect(x: f.minX, y: f.maxY - height, width: f.width, height: height),
                        display: true)
         }
@@ -271,3 +271,4 @@ struct KeyCatcher: NSViewRepresentable {
         }
     }
 }
+

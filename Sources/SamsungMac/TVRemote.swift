@@ -46,6 +46,7 @@ final class TVRemote {
     private var pending: [Queued] = []
     private var approvalTimer: Task<Void, Never>?
     private var keepAlive: Task<Void, Never>?
+    private var openedAt: Date = .distantPast
     private var target: (host: String, token: String?, secure: Bool)?
     private var retries = 0
     private let session = URLSession(configuration: .ephemeral,
@@ -77,6 +78,7 @@ final class TVRemote {
         guard let url = URL(string: s) else { return }
         let t = session.webSocketTask(with: url)
         task = t
+        openedAt = Date()
         state = .connecting
         t.resume()
         receive(t)
@@ -163,6 +165,7 @@ final class TVRemote {
         } else {
             pending.append(Queued(text: text, at: Date()))
             if pending.count > 20 { pending.removeFirst() }
+            restartIfStalled()
             reconnectIfIdle()
         }
     }
@@ -179,6 +182,18 @@ final class TVRemote {
                 self.reconnectIfIdle()
             }
         }
+    }
+
+    /// A click while a paired TV still hasn't answered a connection
+    /// attempt after a few seconds starts a fresh one, so clicks never wait
+    /// out a stuck attempt. A first pairing waits on the TV's prompt.
+    private func restartIfStalled() {
+        guard let task, let target, state != .paired, state != .denied,
+              !(target.token ?? "").isEmpty || !target.secure,
+              Date().timeIntervalSince(openedAt) > 3 else { return }
+        drop(task, keepQueue: true)
+        retries = 0
+        open(host: target.host, token: target.token, secure: target.secure)
     }
 
     private func reconnectIfIdle() {

@@ -3,7 +3,8 @@ import SwiftUI
 struct MenuView: View {
     @Environment(TVSystem.self) private var tv
     @Environment(\.isScreenshotting) private var isScreenshotting
-    @State private var contentHeight: CGFloat = 0
+    /// Sections whose rows are fading out before the section closes.
+    @State private var closing: Set<String> = []
 
     /// Show the populated controls whenever we know the TV — even while it
     /// is still answering — so opening the panel never flashes an empty
@@ -51,10 +52,7 @@ struct MenuView: View {
         }
         .frame(width: 320)
         .animation(.panel, value: "\(remoteExpanded)\(appsExpanded)\(inputsExpanded)\(tv.pairState == .paired)\(tv.connectionLost)")
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
-        .background {
-            if !isScreenshotting { KeyCatcher(height: contentHeight) { handleKey($0) } }
-        }
+        .modifier(PanelSizer(enabled: !isScreenshotting) { handleKey($0) })
         .onAppear { tv.menuOpened() }
         .onDisappear { tv.menuClosed() }
     }
@@ -70,7 +68,7 @@ struct MenuView: View {
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                expanded.wrappedValue.toggle()
+                toggle(title, expanded)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "chevron.down")
@@ -92,11 +90,30 @@ struct MenuView: View {
             .buttonStyle(.plain)
             if expanded.wrappedValue {
                 content()
+                    .opacity(closing.contains(title) ? 0 : 1)
                     .transition(.panelRow)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// Opening grows the window and then fades the rows in; closing fades
+    /// them out and then shrinks the window, so nothing is drawn while the
+    /// edge passes over it.
+    private func toggle(_ title: String, _ expanded: Binding<Bool>) {
+        guard expanded.wrappedValue else {
+            closing.remove(title)
+            expanded.wrappedValue = true
+            return
+        }
+        guard !closing.contains(title) else { return }
+        withAnimation(.easeIn(duration: 0.09)) { _ = closing.insert(title) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) {
+            guard closing.contains(title) else { return }
+            expanded.wrappedValue = false
+            closing.remove(title)
+        }
     }
 
     // MARK: - Keyboard
@@ -263,37 +280,53 @@ struct MenuView: View {
         .accessibilityLabel(label)
     }
 
-    private let twoColumns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 2)
-
-    private var appGrid: some View {
-        LazyVGrid(columns: twoColumns, spacing: 2) {
-            ForEach(tv.apps) { app in
-                ChoiceRow(symbol: Self.symbol(for: app.name), title: app.name,
-                          active: tv.foregroundApp?.id == app.id) { tv.launch(app) }
-                    .help("Open \(app.name)")
+    /// Two columns laid out eagerly. A lazy grid places cells that appear
+    /// mid-animation at its origin first, so they flew in from the top.
+    private func twoColumns<Item, Cell: View>(_ items: [Item],
+                                              @ViewBuilder cell: @escaping (Item) -> Cell) -> some View {
+        VStack(spacing: 2) {
+            ForEach(Array(stride(from: 0, to: items.count, by: 2)), id: \.self) { i in
+                HStack(spacing: 4) {
+                    cell(items[i]).frame(maxWidth: .infinity)
+                    if i + 1 < items.count {
+                        cell(items[i + 1]).frame(maxWidth: .infinity)
+                    } else {
+                        Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
+                    }
+                }
             }
         }
         .padding(.horizontal, -6)
+    }
+
+    private var appGrid: some View {
+        twoColumns(tv.apps) { app in
+            ChoiceRow(symbol: Self.symbol(for: app.name), title: app.name,
+                      active: tv.foregroundApp?.id == app.id) { tv.launch(app) }
+                .help("Open \(app.name)")
+        }
     }
 
     /// HDMI 1–4 where the TV takes direct input keys. Newer sets ignore
     /// them, so once that's seen the section steps through inputs instead.
     @ViewBuilder
     private var inputGrid: some View {
-        LazyVGrid(columns: twoColumns, spacing: 2) {
-            if tv.directInputs {
-                ForEach(1...4, id: \.self) { n in
-                    ChoiceRow(symbol: "cable.connector", title: "HDMI \(n)",
-                              active: tv.foregroundApp == nil && tv.lastInput == "HDMI \(n)") {
-                        tv.selectInput(n)
-                    }
+        if tv.directInputs {
+            twoColumns(Array(1...4)) { n in
+                ChoiceRow(symbol: "cable.connector", title: "HDMI \(n)",
+                          active: tv.foregroundApp == nil && tv.lastInput == "HDMI \(n)") {
+                    tv.selectInput(n)
                 }
-            } else {
-                ChoiceRow(symbol: "arrow.right.circle", title: "Next Input") { tv.nextInput() }
-                ChoiceRow(symbol: "rectangle.on.rectangle", title: "Source List") { tv.press(.source) }
             }
+        } else {
+            HStack(spacing: 4) {
+                ChoiceRow(symbol: "arrow.right.circle", title: "Next Input") { tv.nextInput() }
+                    .frame(maxWidth: .infinity)
+                ChoiceRow(symbol: "rectangle.on.rectangle", title: "Source List") { tv.press(.source) }
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, -6)
         }
-        .padding(.horizontal, -6)
     }
 
     /// Apps have no icons over the network API, so each gets a symbol for
