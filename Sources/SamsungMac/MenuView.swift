@@ -5,6 +5,12 @@ struct MenuView: View {
     @Environment(\.isScreenshotting) private var isScreenshotting
     /// Sections whose rows are fading out before the section closes.
     @State private var closing: Set<String> = []
+    /// The text field was opened from its button, for TVs that don't say
+    /// when their keyboard is up.
+    @State private var typing = false
+    @FocusState private var fieldFocused: Bool
+
+    private var showField: Bool { typing || tv.keyboardOpen }
 
     /// Show the populated controls whenever we know the TV — even while it
     /// is still answering — so opening the panel never flashes an empty
@@ -51,7 +57,7 @@ struct MenuView: View {
             }
         }
         .frame(width: 320)
-        .animation(.panel, value: "\(remoteExpanded)\(appsExpanded)\(inputsExpanded)\(tv.pairState == .paired)\(tv.connectionLost)")
+        .animation(.panel, value: "\(remoteExpanded)\(appsExpanded)\(inputsExpanded)\(tv.pairState == .paired)\(tv.connectionLost)\(showField)")
         .modifier(PanelSizer(enabled: !isScreenshotting) { handleKey($0) })
         .onAppear { tv.menuOpened() }
         .onDisappear { tv.menuClosed() }
@@ -120,8 +126,30 @@ struct MenuView: View {
 
     /// Arrow keys, Return, Delete (Back), Space (play/pause), H (Home),
     /// +/− (volume) and M (mute) drive the TV while the panel is open.
-    /// Escape still closes the panel.
+    /// Escape still closes the panel. While the text field has focus its
+    /// keys go to it instead, and Escape just closes the field.
     private func handleKey(_ event: NSEvent) -> Bool {
+        if fieldFocused {
+            guard event.keyCode == 53 else { return false }
+            closeField()
+            return true
+        }
+        // The field is up but lost focus: typing still goes into it rather
+        // than to the remote shortcuts (H would otherwise mean Home).
+        if showField, event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            switch event.keyCode {
+            case 53: closeField()
+            case 51: tv.typeText(String(tv.typedText.dropLast()))
+            case 36, 76: tv.submitText(); typing = false
+            default:
+                guard let chars = event.characters, !chars.isEmpty,
+                      chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
+                      !(123...126).contains(event.keyCode) else { return false }
+                tv.typeText(tv.typedText + chars)
+            }
+            fieldFocused = true
+            return true
+        }
         guard tv.powerOn, !tv.connectionLost, showControls,
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return false }
         switch event.keyCode {
@@ -194,14 +222,50 @@ struct MenuView: View {
                 Spacer(minLength: 8)
                 // Seek and skip keys are left out: apps like Spotify ignore
                 // them, so only play/pause is reliable across apps.
+                iconButton("keyboard", help: "Type on TV") {
+                    if showField { closeField() } else { typing = true; fieldFocused = true }
+                }
                 iconButton("playpause.fill", primary: true, help: "Play / Pause") { tv.playPause() }
             }
             volume
+            if showField {
+                textField
+                    .transition(.panelRow)
+            }
+        }
+        .onChange(of: tv.keyboardOpen) { _, open in
+            if open { fieldFocused = true }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .disabled(!tv.powerOn || tv.connectionLost)
         .opacity(tv.powerOn && !tv.connectionLost ? 1 : 0.4)
+    }
+
+    /// Mirrors into the field the TV's on-screen keyboard is editing, so
+    /// search boxes can be typed from the Mac. Return runs the search.
+    private var textField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "keyboard")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+            TextField("Type on TV", text: Binding(get: { tv.typedText }, set: { tv.typeText($0) }))
+                .textFieldStyle(.plain)
+                .focused($fieldFocused)
+                .onSubmit {
+                    tv.submitText()
+                    typing = false
+                }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+    }
+
+    private func closeField() {
+        typing = false
+        fieldFocused = false
+        tv.keyboardOpen = false
     }
 
     private var nowPlayingTitle: String {

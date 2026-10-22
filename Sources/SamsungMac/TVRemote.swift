@@ -32,6 +32,9 @@ final class TVRemote {
     var onState: (PairState) -> Void = { _ in }
     var onToken: (String) -> Void = { _ in }
     var onApps: ([TVApp]) -> Void = { _ in }
+    /// The TV's on-screen keyboard opened (with the text already in the
+    /// field) or closed (nil).
+    var onKeyboard: (String?) -> Void = { _ in }
 
     private(set) var state: PairState = .idle {
         didSet { if state != oldValue { onState(state) } }
@@ -115,6 +118,7 @@ final class TVRemote {
         pending = []
         retries = 0
         if state != .denied { state = .idle }
+        onKeyboard(nil)
     }
 
     /// Forget a declined pairing so the next connect prompts again.
@@ -140,6 +144,21 @@ final class TVRemote {
         sendJSON(["method": "ms.remote.control",
                   "params": ["Cmd": cmd, "DataOfCmd": code,
                              "Option": "false", "TypeOfRemote": "SendRemoteKey"]])
+    }
+
+    /// Replaces the text in the field the TV's on-screen keyboard is
+    /// editing. Does nothing when no keyboard is up.
+    func sendText(_ text: String) {
+        sendJSON(["method": "ms.remote.control",
+                  "params": ["Cmd": Data(text.utf8).base64EncodedString(), "DataOfCmd": "base64",
+                             "Option": "false", "TypeOfRemote": "SendInputString"]])
+    }
+
+    /// Closes the TV's keyboard, which submits the field (runs the search).
+    func endText() {
+        sendJSON(["method": "ms.remote.control",
+                  "params": ["Cmd": "", "DataOfCmd": "",
+                             "Option": "false", "TypeOfRemote": "SendInputEnd"]])
     }
 
     func requestApps() {
@@ -249,6 +268,7 @@ final class TVRemote {
         task = nil
         if !keepQueue { pending = [] }
         if state != .denied { state = .idle }
+        onKeyboard(nil)
     }
 
     private func flushQueue() {
@@ -317,6 +337,14 @@ final class TVRemote {
             if !apps.isEmpty {
                 onApps(apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
             }
+        case "ms.remote.imeStart", "ms.remote.imeUpdate":
+            // The field's current text comes base64-encoded, when at all.
+            let current = (obj["data"] as? String)
+                .flatMap { Data(base64Encoded: $0) }
+                .map { String(decoding: $0, as: UTF8.self) }
+            onKeyboard(current ?? "")
+        case "ms.remote.imeEnd", "ms.remote.imeDone":
+            onKeyboard(nil)
         default:
             break
         }

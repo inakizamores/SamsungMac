@@ -27,6 +27,11 @@ final class Throttler {
             }
         }
     }
+
+    func cancel() {
+        pending?.cancel()
+        pending = nil
+    }
 }
 
 enum LoginItem {
@@ -101,6 +106,10 @@ final class TVSystem {
     /// The TV was on and stopped answering on the network (Wi-Fi dropout,
     /// TV busy). Shown as reconnecting rather than as the TV being off.
     var connectionLost = false
+    /// The TV's on-screen keyboard is up, so the panel offers a text field.
+    var keyboardOpen = false
+    /// What the panel's text field holds, mirrored into the TV's field.
+    var typedText = ""
 
     /// The TV can't report play state, so play/pause alternates locally,
     /// assuming something is playing the first time.
@@ -124,6 +133,7 @@ final class TVSystem {
     @ObservationIgnored private var volumeTask: Task<Void, Never>?
     @ObservationIgnored private var foregroundTask: Task<Void, Never>?
     @ObservationIgnored private let volumeThrottler = Throttler(interval: 0.15)
+    @ObservationIgnored private let textThrottler = Throttler(interval: 0.15)
 
     // Volume-mode evidence. The panel only swaps between slider and
     // steppers on what the TV actually did, and never mid-interaction.
@@ -175,6 +185,17 @@ final class TVSystem {
     init() {
         remote.onState = { [weak self] in self?.pairState = $0 }
         remote.onToken = { [weak self] in self?.token = $0 }
+        // The TV echoes each update back; only a newly opened keyboard's
+        // text is taken, so the echo never fights what's being typed.
+        remote.onKeyboard = { [weak self] text in
+            guard let self else { return }
+            if let text {
+                if !self.keyboardOpen { self.typedText = text }
+                self.keyboardOpen = true
+            } else {
+                self.keyboardOpen = false
+            }
+        }
         // Older firmware still answers the installed-apps request; merge it
         // with what the catalog lookup found.
         remote.onApps = { [weak self] found in
@@ -432,7 +453,8 @@ final class TVSystem {
         let tvID = currentTVID
         // The installed list rarely changes; refreshing it costs ~30
         // requests, which a busy TV's web server doesn't take well.
-        if appsTask == nil, appsLoadedFor != tvID || Date().timeIntervalSince(appsLoadedAt) > 600 {
+        if appsTask == nil, Date() >= suppressForegroundUntil,
+           appsLoadedFor != tvID || Date().timeIntervalSince(appsLoadedAt) > 600 {
             appsLoadedFor = tvID
             appsLoadedAt = Date()
             let known = apps
@@ -480,15 +502,24 @@ final class TVSystem {
         foregroundApp = current
     }
 
-    /// Keys that can leave or open an app get a quick follow-up look.
+    /// Keys that can leave or open an app get a follow-up look, once the
+    /// TV has had time to start whatever it's opening. Its web server was
+    /// seen crashing (and taking ~40 seconds to come back) when asked about
+    /// apps while one was starting, so app lookups pause for 15 seconds.
     private func recheckForeground() {
         guard let ip = knownIP else { return }
+        quietWhileAppStarts()
         recheckTask?.cancel()
         recheckTask = Task {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            let wait = max(0, self.suppressForegroundUntil.timeIntervalSinceNow) + 0.5
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await checkForeground(ip, full: true)
         }
+    }
+
+    private func quietWhileAppStarts() {
+        suppressForegroundUntil = max(suppressForegroundUntil, Date().addingTimeInterval(15))
     }
 
     /// The ARP cache only has the TV once the Mac has talked to it, so
@@ -678,6 +709,25 @@ final class TVSystem {
         if [.home, .back, .enter, .source].contains(key) { recheckForeground() }
     }
 
+    /// Sends the whole field on each change: the TV replaces its field's
+    /// text rather than appending, so edits and deletions carry over.
+    func typeText(_ text: String) {
+        typedText = text
+        ensureRemote()
+        textThrottler.call { [weak self] in self?.remote.sendText(text) }
+    }
+
+    /// Return in the panel: closes the TV's keyboard, which runs the search.
+    func submitText() {
+        textThrottler.cancel()
+        ensureRemote()
+        remote.sendText(typedText)
+        remote.endText()
+        typedText = ""
+        keyboardOpen = false
+        recheckForeground()
+    }
+
     func playPause() {
         press(assumePlaying ? .pause : .play)
         assumePlaying.toggle()
@@ -724,7 +774,7 @@ final class TVSystem {
         guard let ip = knownIP else { return }
         foregroundApp = app
         assumePlaying = true
-        suppressForegroundUntil = Date().addingTimeInterval(6)
+        quietWhileAppStarts()
         Task {
             if await !AppCatalog.launch(host: ip, id: app.id) {
                 ensureRemote()

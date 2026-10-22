@@ -63,28 +63,18 @@ enum AppCatalog {
                              visible: obj["visible"] as? Bool ?? false))
     }
 
-    /// Every catalog app installed on the TV, alphabetically. Looked up a
-    /// few at a time, since the TV's web server drops requests under a
-    /// burst, and unanswered IDs are asked again one by one. An app already
-    /// in `known` stays unless the TV says it's gone, so a busy TV can't
-    /// shrink the list.
+    /// Every catalog app installed on the TV, alphabetically. Looked up one
+    /// at a time, since the TV's web server drops requests under a burst,
+    /// and unanswered IDs are asked once more. An app already in `known`
+    /// stays unless the TV says it's gone, so a busy TV can't shrink the list.
     static func installed(host: String, known: [TVApp]) async -> [TVApp] {
         var apps: [TVApp] = []
         var unanswered: [String] = []
-        for start in stride(from: 0, to: ids.count, by: 4) {
-            let chunk = ids[start..<min(start + 4, ids.count)]
-            let results = await withTaskGroup(of: (String, Lookup).self) { group in
-                for id in chunk { group.addTask { (id, await lookup(host: host, id: id)) } }
-                var all: [(String, Lookup)] = []
-                for await r in group { all.append(r) }
-                return all
-            }
-            for (id, result) in results {
-                switch result {
-                case .found(let status): apps.append(status.app)
-                case .missing: break
-                case .noAnswer: unanswered.append(id)
-                }
+        for id in ids {
+            switch await lookup(host: host, id: id) {
+            case .found(let status): apps.append(status.app)
+            case .missing: break
+            case .noAnswer: unanswered.append(id)
             }
         }
         for id in unanswered {
@@ -98,21 +88,12 @@ enum AppCatalog {
         return apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// The installed app currently on screen, if any.
+    /// The installed app currently on screen, if any. Asked one app at a
+    /// time: parallel lookups are what a busy TV's web server chokes on.
     static func foreground(host: String, among apps: [TVApp]) async -> TVApp? {
-        for start in stride(from: 0, to: apps.count, by: 4) {
-            let chunk = apps[start..<min(start + 4, apps.count)]
-            let hit = await withTaskGroup(of: TVApp?.self) { group -> TVApp? in
-                for app in chunk {
-                    group.addTask {
-                        if case .found(let status) = await lookup(host: host, id: app.id), status.visible { return app }
-                        return nil
-                    }
-                }
-                for await hit in group { if let hit { group.cancelAll(); return hit } }
-                return nil
-            }
-            if let hit { return hit }
+        for app in apps {
+            if Task.isCancelled { return nil }
+            if case .found(let status) = await lookup(host: host, id: app.id), status.visible { return app }
         }
         return nil
     }
