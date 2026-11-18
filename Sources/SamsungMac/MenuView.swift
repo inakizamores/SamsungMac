@@ -118,7 +118,7 @@ struct MenuView: View {
 
     // MARK: - Keyboard
 
-    /// Arrow keys, Return, Delete (Back), Space (play/pause), H (Home),
+    /// Arrow keys, Return, Delete (Back), Space (play/pause), H (Home), G (Game Bar),
     /// +/− (volume) and M (mute) drive the TV while the panel is open.
     /// Escape still closes the panel.
     private func handleKey(_ event: NSEvent) -> Bool {
@@ -135,6 +135,7 @@ struct MenuView: View {
         default:
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "h": tv.press(.home)
+            case "g": tv.openGameBar()
             case "m": tv.toggleMute()
             case "=", "+": stepVolume(up: true)
             case "-": stepVolume(up: false)
@@ -194,6 +195,7 @@ struct MenuView: View {
                 Spacer(minLength: 8)
                 // Seek and skip keys are left out: apps like Spotify ignore
                 // them, so only play/pause is reliable across apps.
+                iconButton("gamecontroller", help: "Game Bar") { tv.openGameBar() }
                 iconButton("playpause.fill", primary: true, help: "Play / Pause") { tv.playPause() }
             }
             volume

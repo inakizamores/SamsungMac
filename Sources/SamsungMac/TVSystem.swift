@@ -693,6 +693,14 @@ final class TVSystem {
         assumePlaying.toggle()
     }
 
+    /// Game Bar: a held play/pause key, the same long press as on the
+    /// remote. The TV only shows it while Game Mode is on (a console or PC
+    /// over HDMI, VRR active).
+    func openGameBar() {
+        ensureRemote()
+        remote.hold(.play, seconds: 1.5)
+    }
+
     /// HDMI 1–4 keys work on older sets and are ignored by newer ones. If
     /// an app was on screen and still is a few seconds later, the key did
     /// nothing: the TV is marked and the panel switches to Next Input.
